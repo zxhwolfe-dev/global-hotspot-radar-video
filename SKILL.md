@@ -29,7 +29,7 @@ Skill 固定的是编辑流程、明确长期偏好和可验证底线，不固�
 
 ## 必要能力与边界
 
-- 当前选题必须基于本次任务的实时 Radar 数据和联网核查，不能用模型记忆或昨日缓存冒充今天。
+- 当前选题以本次实时 Radar 扫描为基线，同时执行站外主动发现与原文核查；Radar 不是候选白名单。站外题材注明来源，不伪造 Radar ID 或分数，不能用模型记忆或昨日缓存冒充今天。工具不可用时如实披露覆盖限制。
 - Radar 只提供发现线索和趋势观测，事实必须回到新闻原文、官方公告、监管记录、论文、赛事或产品官方材料核实。
 - 选题阶段优先使用 `topic-intelligence` 的实时证据合同；本系列已由用户明确要求“大样本扫描”，因此不要套用普通任务的前12或24条限制。
 - 生图阶段必须使用 Codex 内置 `imagegen` / Imagen；不得调用 AI 工作站的生图功能。
@@ -55,7 +55,7 @@ Skill 固定的是编辑流程、明确长期偏好和可验证底线，不固�
 - SRT 旁挂字幕；
 - `publish_info.md`；
 - `content_manifest.json`、`episode_manifest.json`、`source_manifest.json`；
-- `selection_report.json`，记录实时扫描、查重、今日新增事实、观众收益与最终编辑切入点；
+- `selection_report.json`，记录实时扫描、站外发现、查重、今日新增事实、观众收益与最终编辑切入点；新制作按 `selection_and_research.md` 保存研究合同与来源引用；
 - 音画同步和技术验证报告；
 - 完整内容审核记录 `final/content_audit.json`；
 - 渲染性能与缓存报告；需要比较编码路径时附 `final/encoder_benchmark.json`；
@@ -63,5 +63,7 @@ Skill 固定的是编辑流程、明确长期偏好和可验证底线，不固�
 - 发布工作台识别结果。
 - `final/visual_risk_report.json`（只预警，不拦截）。
 - 使用 `scene_v2` 时的 `final/motion_quality_report.json`。
+
+新制作在 TTS/生图前，按 `selection_and_research.md` 运行 [scripts/check_selection_research.py](scripts/check_selection_research.py) 的 `--require` 研究记录检查。它不联网、不核实事实、不评价创意，也不改变旧 manifest 或发布状态。
 
 先运行 [scripts/build_topic_history.py](scripts/build_topic_history.py) 支持选题查重；制作时用 [scripts/render_episode.py](scripts/render_episode.py) 的预览、候选、发布三档和内容寻址缓存；需要测本机编码器时用 [scripts/benchmark_render_path.py](scripts/benchmark_render_path.py)；最后运行 [scripts/validate_episode.py](scripts/validate_episode.py) 做确定性终检，后者会调用 [scripts/scan_visual_risks.py](scripts/scan_visual_risks.py) 生成只读预警。终检通过不代表事实与审美自动合格，仍需完整阅读口播、抽查画面并听原声窗口。
