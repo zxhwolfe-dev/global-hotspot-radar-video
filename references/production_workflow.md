@@ -23,6 +23,19 @@
 
 中英文分目录，避免工作台语言识别和发布文案串线。
 
+## 渲染前的只读预检（P1）
+
+研究阶段仍先按 `selection_and_research.md` 检查来源记录。素材及 `content_manifest.json` 准备好后、首次渲染或修订重渲染前，再运行不依赖 TTS/视觉服务的预检；只有退出码为0才继续：
+
+```bash
+python scripts/preflight_episode.py "$PROJECT" --require-research && \
+python scripts/render_episode.py --manifest "$PROJECT/content_manifest.json" --mode preview
+```
+
+预检检查基础结构、字幕正文/分页/显式保护词、素材路径以及研究记录，不联网、不生成语音、不改输入。仍按既有音频指纹选择 `--reuse-audio` 或 `--reuse-tts`，不自动重试付费调用。新制作最终执行 `python scripts/validate_episode.py "$PROJECT" --require-research`；终检会重新读取当前研究记录并检查实际 SRT，不复用旧 PASS。
+
+旧项目可省略 `--require-research`；未启用的研究合同明确标 `NOT_CONFIGURED`，不回写历史文件。预检 `STRUCTURE_OK` 不是事实、听感或发布通过。原渲染器直接入口保持兼容，不会自动执行预检；两条命令须用 `&&` 或显式检查退出码。详细边界和本地复核见根目录 `P1_VALIDATION_20260918.md`、`CODEX_HANDOFF_20260918.md`。
+
 ## 视觉策划
 
 - 进入 TTS 或生图前，先按 `editorial_platforms.md` 完成事实、结构、文字编辑与首读/来源分步复核，保存定稿、材料归属、独立价值及未完成检查。新项目在该交接点按 `selection_and_research.md` 运行研究记录预检并处理结构错误；主张或来源变化后重新检查，`STRUCTURE_OK` 不替代内容审查。没有完成这一交接，不先调用会生成语音的渲染命令。定稿后按语义拆节拍、列视觉清单，不为凑卡片、动效或结尾槽位增加旁白；为时长改稿后须回核受影响主张。数量不限；一般封面1张、每条新闻2–4张。

@@ -3,13 +3,22 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any
 
-from scan_visual_risks import scan_episode
+from ghr_renderer.subtitle_validation import check_srt
+from preflight_episode import check_project, read_object
+
+
+def scan_episode(root: Path) -> dict[str, Any]:
+    # Optional visual dependencies must fail inside the advisory-only boundary,
+    # not at module import before manifest/JSON diagnostics can run.
+    from scan_visual_risks import scan_episode as scan
+    return scan(root)
 
 EXPECTED_WIDTH = 1080
 EXPECTED_HEIGHT = 1920
@@ -36,7 +45,7 @@ def run(*args: str) -> subprocess.CompletedProcess[str]:
 
 
 def read_json(path: Path) -> Any:
-    return json.loads(path.read_text(encoding="utf-8"))
+    return read_object(path)
 
 
 def probe(path: Path) -> dict[str, Any]:
@@ -61,20 +70,25 @@ def trailing_silence(path: Path, duration_sec: float) -> float | None:
         ],
         check=False, capture_output=True, text=True,
     )
+    if result.returncode != 0 or not math.isfinite(duration_sec) or duration_sec <= 0:
+        return None
     starts = [float(value) for value in re.findall(r"silence_start:\s*([0-9.]+)", result.stderr)]
     ends = [float(value) for value in re.findall(r"silence_end:\s*([0-9.]+)", result.stderr)]
     if not starts or not ends:
         return None
     end = ends[-1]
-    if end < duration_sec - 0.12:
+    if not all(math.isfinite(value) for value in (end, starts[-1])) or not 0 <= starts[-1] < end or abs(end - duration_sec) > 0.12:
         return None
     return end - starts[-1]
 
 
-def validate(root: Path) -> dict[str, Any]:
+def _validate(root: Path, *, require_research: bool = False) -> dict[str, Any]:
     errors: list[str] = []
     warnings: list[str] = []
-    checks: dict[str, Any] = {}
+    preflight = check_project(root, require_research=require_research)
+    checks: dict[str, Any] = {"preflight": preflight}
+    errors.extend(preflight["errors"])
+    warnings.extend(preflight["warnings"])
 
     required = {
         "content_manifest": root / "content_manifest.json",
@@ -158,7 +172,8 @@ def validate(root: Path) -> dict[str, Any]:
     tail_config = float(video_cfg.get("tail_hold_seconds", -1))
     if abs(tail_config - EXPECTED_TAIL) > 0.001:
         errors.append(f"tail_hold_seconds must be {EXPECTED_TAIL}, got {tail_config}")
-    if abs(float(episode.get("tail_hold_sec", -1)) - EXPECTED_TAIL) > 0.001:
+    episode_tail = float(episode.get("tail_hold_sec", -1))
+    if not math.isfinite(episode_tail) or abs(episode_tail - EXPECTED_TAIL) > 0.001:
         errors.append("episode_manifest tail_hold_sec must be 0.8")
 
     for card in cards:
@@ -211,18 +226,10 @@ def validate(root: Path) -> dict[str, Any]:
         errors.append(f"unsupported or missing language: {language}")
 
     srt_text = required["subtitles"].read_text(encoding="utf-8")
-    cue_count = len(re.findall(r"(?m)^\d+\s*$", srt_text))
     speech_count = sum(1 for card in cards if str(card.get("tts_text") or "").strip())
-    expected_cue_count = sum(
-        len(card.get("caption_chunks") or [card.get("caption_text")])
-        for card in cards if str(card.get("tts_text") or "").strip()
-    )
-    if cue_count != expected_cue_count:
-        errors.append(f"SRT cue count {cue_count} != expected caption page count {expected_cue_count}")
+    measured_duration = None
     checks["card_count"] = len(cards)
     checks["speech_card_count"] = speech_count
-    checks["expected_caption_page_count"] = expected_cue_count
-    checks["srt_cue_count"] = cue_count
 
     if video:
         media = probe(video)
@@ -230,6 +237,9 @@ def validate(root: Path) -> dict[str, Any]:
         video_stream = next((stream for stream in streams if stream.get("codec_type") == "video"), None)
         audio_stream = next((stream for stream in streams if stream.get("codec_type") == "audio"), None)
         duration_sec = float((media.get("format") or {}).get("duration") or 0)
+        measured_duration = duration_sec
+        if not math.isfinite(duration_sec) or duration_sec <= 0:
+            raise ValueError("ffprobe duration must be finite and positive")
         if not video_stream:
             errors.append("final mp4 has no video stream")
         else:
@@ -238,7 +248,7 @@ def validate(root: Path) -> dict[str, Any]:
             if int(video_stream.get("width") or 0) != EXPECTED_WIDTH or int(video_stream.get("height") or 0) != EXPECTED_HEIGHT:
                 errors.append(f"video canvas must be 1080x1920, got {video_stream.get('width')}x{video_stream.get('height')}")
             measured_fps = fps_value(str(video_stream.get("r_frame_rate") or "0/1"))
-            if abs(measured_fps - EXPECTED_FPS) > 0.01:
+            if not math.isfinite(measured_fps) or abs(measured_fps - EXPECTED_FPS) > 0.01:
                 errors.append(f"video fps must be 30, got {measured_fps}")
         if not audio_stream:
             errors.append("final mp4 has no audio stream")
@@ -255,6 +265,12 @@ def validate(root: Path) -> dict[str, Any]:
             "video_codec": None if not video_stream else video_stream.get("codec_name"),
             "audio_codec": None if not audio_stream else audio_stream.get("codec_name"),
         })
+
+    subtitle_report = check_srt(srt_text, content, duration_sec=measured_duration)
+    errors.extend(subtitle_report["errors"])
+    checks["subtitle_contract"] = subtitle_report
+    checks["expected_caption_page_count"] = subtitle_report["expected_page_count"]
+    checks["srt_cue_count"] = subtitle_report["cue_count"]
 
     if "/creative_work/videos/" not in str(root):
         warnings.append("episode is outside the default creative_work/videos catalogue")
@@ -292,12 +308,24 @@ def validate(root: Path) -> dict[str, Any]:
     }
 
 
+def validate(root: Path, *, require_research: bool = False) -> dict[str, Any]:
+    """Report corrupt input/tool failures as FAIL instead of leaving a stale PASS."""
+    try:
+        return _validate(root.resolve(), require_research=require_research)
+    except (OSError, UnicodeError, ValueError, TypeError, KeyError, AttributeError,
+            OverflowError, ZeroDivisionError, subprocess.SubprocessError) as exc:
+        return {"status": "FAIL", "root": str(root), "errors": [
+            f"validation input/tool error: {type(exc).__name__}: {exc}"],
+            "warnings": [], "checks": {"validation_incomplete": True}}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Validate a Global Hotspot Radar episode directory")
     parser.add_argument("episode_root", type=Path)
     parser.add_argument("--json-output", type=Path)
+    parser.add_argument("--require-research", action="store_true", help="Require P0 research records for a new episode")
     args = parser.parse_args()
-    report = validate(args.episode_root.resolve())
+    report = validate(args.episode_root.resolve(), require_research=args.require_research)
     rendered = json.dumps(report, ensure_ascii=False, indent=2)
     print(rendered)
     if args.json_output:
