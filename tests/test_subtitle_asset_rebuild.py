@@ -99,7 +99,7 @@ def test_reuse_audio_rebuilds_ass_and_srt_from_current_settings(tmp_path, monkey
 
     fingerprint_before = _seed_project(tmp_path, font_size=56)
 
-    def fake_render_video(root, data, timeline, audio_sec, *, mode):
+    def fake_render_video(root, data, timeline, audio_sec, *, mode, artifacts_dir=None):
         return root / "final" / "reuse_subtitles.mp4", 4.0, {"stub": True}
 
     monkeypatch.setattr(render_episode, "render_video", fake_render_video)
@@ -107,9 +107,10 @@ def test_reuse_audio_rebuilds_ass_and_srt_from_current_settings(tmp_path, monkey
         "--manifest", str(tmp_path / "content_manifest.json"), "--mode", "preview", "--reuse-audio"])
     rc = render_episode.main()
     assert rc == 0
-    assert _font_size_in_ass(tmp_path / "final" / "subtitles_burn.ass") == 56
-    assert "旧字幕" not in (tmp_path / "final" / "subtitles.srt").read_text(encoding="utf-8")
-    assert "OpenAI" in (tmp_path / "final" / "subtitles.srt").read_text(encoding="utf-8")
+    staged = tmp_path / "preview"  # preview tier stages sidecars outside final/
+    assert _font_size_in_ass(staged / "subtitles_burn.ass") == 56
+    assert "旧字幕" not in (staged / "subtitles.srt").read_text(encoding="utf-8")
+    assert "OpenAI" in (staged / "subtitles.srt").read_text(encoding="utf-8")
 
     # Layout-only change: reuse must still succeed (audio fingerprint unchanged)
     # and rebuild assets with the new settings.
@@ -122,8 +123,8 @@ def test_reuse_audio_rebuilds_ass_and_srt_from_current_settings(tmp_path, monkey
         "--manifest", str(tmp_path / "content_manifest.json"), "--mode", "preview", "--reuse-audio"])
     rc = render_episode.main()
     assert rc == 0, "layout-only change must not invalidate the audio fingerprint"
-    assert _font_size_in_ass(tmp_path / "final" / "subtitles_burn.ass") == 72
-    srt_text = (tmp_path / "final" / "subtitles.srt").read_text(encoding="utf-8")
+    assert _font_size_in_ass(tmp_path / "preview" / "subtitles_burn.ass") == 72
+    srt_text = (tmp_path / "preview" / "subtitles.srt").read_text(encoding="utf-8")
     assert "旧字幕" not in srt_text
     # Pages stay per caption_chunks; timestamps separate them.
     assert "OpenAI 发布了" in srt_text and "新模型。" in srt_text

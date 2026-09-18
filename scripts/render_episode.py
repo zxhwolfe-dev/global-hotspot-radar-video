@@ -394,14 +394,17 @@ def load_tts_config(data: dict[str, Any]) -> AliyunTTSConfig:
     )
 
 
-def build_audio(root: Path, data: dict[str, Any], *, reuse_tts: bool = False) -> tuple[list[dict[str, Any]], float, float]:
-    audio_dir, final_dir = root / "audio", root / "final"
+def build_audio(root: Path, data: dict[str, Any], *, reuse_tts: bool = False, mode: str = "release") -> tuple[list[dict[str, Any]], float, float, Path]:
+    audio_dir = root / "audio"
+    # Lower tiers stage their sidecar artifacts outside final/ so a preview or
+    # candidate pass after a release never rewrites committed files.
+    out_dir = root / "final" if mode == "release" else root / "preview"
+    out_dir.mkdir(parents=True, exist_ok=True)
     work = root / "temp" / "audio"
     if work.exists():
         shutil.rmtree(work)
     work.mkdir(parents=True)
     audio_dir.mkdir(parents=True, exist_ok=True)
-    final_dir.mkdir(parents=True, exist_ok=True)
     pre_roll = float(data["video"].get("pre_roll_seconds", 0.35))
     tail = float(data["video"]["tail_hold_seconds"])
     audio_design = data.get("audio") or {}
@@ -604,18 +607,18 @@ def build_audio(root: Path, data: dict[str, Any], *, reuse_tts: bool = False) ->
         f"{''.join(mix_labels)}amix=inputs={len(mix_labels)}:duration=longest:normalize=0,"
         f"atrim=duration={total_sec:.3f},loudnorm=I=-16:TP=-1.8:LRA=8[mix]"
     )
-    master = final_dir / "master_narration_with_tail.wav"
+    master = out_dir / "master_narration_with_tail.wav"
     run(
         *audio_args, "-filter_complex", ";".join(filters), "-map", "[mix]",
         "-ar", "48000", "-ac", "1", "-c:a", "pcm_s16le", str(master),
     )
     audio_sec = duration(master)
     protected_terms = tuple(str(term) for term in (data.get("video", {}).get("subtitle_keep_terms") or []))
-    write_srt(cues, final_dir / "subtitles.srt", protected_terms=protected_terms)
+    write_srt(cues, out_dir / "subtitles.srt", protected_terms=protected_terms)
     video_cfg = data.get("video") or {}
     write_single_box_ass(
         cues,
-        final_dir / "subtitles_burn.ass",
+        out_dir / "subtitles_burn.ass",
         width=int(video_cfg.get("width", 1080)),
         height=int(video_cfg.get("height", 1920)),
         font_name=str(video_cfg.get("subtitle_font") or "Microsoft YaHei"),
@@ -624,7 +627,7 @@ def build_audio(root: Path, data: dict[str, Any], *, reuse_tts: bool = False) ->
         margin_v=float(video_cfg.get("subtitle_margin_v", 250)),
         wrapped_texts=[wrap_srt_caption(str(cue["text"]), protected_terms=protected_terms) for cue in cues],
     )
-    (final_dir / "timeline.json").write_text(json.dumps(timeline, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    (out_dir / "timeline.json").write_text(json.dumps(timeline, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     timings_path.write_text(json.dumps(rows, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     report = {
         "status": "PASS", "project": data.get("project"), "provider": "aliyun_qwen_audio",
@@ -648,11 +651,11 @@ def build_audio(root: Path, data: dict[str, Any], *, reuse_tts: bool = False) ->
         },
         "subtitle_content_validation": "PASS: each caption equals its tag-stripped spoken unit",
     }
-    (final_dir / "master_sync_report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    return timeline, current - pre_roll, audio_sec
+    (out_dir / "master_sync_report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return timeline, current - pre_roll, audio_sec, out_dir
 
 
-def reuse_audio(root: Path, data: dict[str, Any]) -> tuple[list[dict[str, Any]], float, float]:
+def reuse_audio(root: Path, data: dict[str, Any], *, mode: str = "release") -> tuple[list[dict[str, Any]], float, float, Path]:
     timeline_path = root / "final" / "timeline.json"
     audio_path = root / "final" / "master_narration_with_tail.wav"
     report_path = root / "final" / "master_sync_report.json"
@@ -666,19 +669,22 @@ def reuse_audio(root: Path, data: dict[str, Any]) -> tuple[list[dict[str, Any]],
     expected = audio_fingerprint(root, data)
     if report.get("audio_fingerprint") != expected:
         raise ValueError("saved audio does not match the current narration, voice, timing, source audio, or mix settings")
-    write_subtitle_assets(root, data, timeline)
-    return timeline, float(report["narration_and_original_audio_duration_sec"]), duration(audio_path)
+    # The release master in final/ stays authoritative and read-only here;
+    # rebuilt subtitle assets stage next to the tier being rendered.
+    out_dir = root / "final" if mode == "release" else root / "preview"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    write_subtitle_assets(out_dir, data, timeline)
+    return timeline, float(report["narration_and_original_audio_duration_sec"]), duration(audio_path), out_dir
 
 
-def write_subtitle_assets(root: Path, data: dict[str, Any], timeline: list[dict[str, Any]]) -> None:
-    """Write final/subtitles.srt and subtitles_burn.ass from verified spoken
-    boundaries and the *current* video settings.
+def write_subtitle_assets(out_dir: Path, data: dict[str, Any], timeline: list[dict[str, Any]]) -> None:
+    """Write subtitles.srt and subtitles_burn.ass into out_dir from verified
+    spoken boundaries and the *current* video settings.
 
     Both build_audio and --reuse-audio go through here so subtitle layout
     (font, margins, protected terms) is never silently reused stale; the
     audio fingerprint deliberately excludes these text-only settings.
     """
-    final_dir = root / "final"
     cards_by_id = {card.get("id"): card for card in data.get("cards", [])}
     cues: list[dict[str, Any]] = []
     for row in timeline:
@@ -690,10 +696,10 @@ def write_subtitle_assets(root: Path, data: dict[str, Any], timeline: list[dict[
         raise ValueError("timeline contains no spoken cards; refusing to write empty subtitle assets")
     video_cfg = data.get("video") or {}
     protected_terms = tuple(str(term) for term in (video_cfg.get("subtitle_keep_terms") or []))
-    write_srt(cues, final_dir / "subtitles.srt", protected_terms=protected_terms)
+    write_srt(cues, out_dir / "subtitles.srt", protected_terms=protected_terms)
     write_single_box_ass(
         cues,
-        final_dir / "subtitles_burn.ass",
+        out_dir / "subtitles_burn.ass",
         width=int(video_cfg.get("width", 1080)),
         height=int(video_cfg.get("height", 1920)),
         font_name=str(video_cfg.get("subtitle_font") or "Microsoft YaHei"),
@@ -1198,6 +1204,7 @@ def render_video(
     audio_sec: float,
     *,
     mode: str,
+    artifacts_dir: Path | None = None,
 ) -> tuple[Path, float, dict[str, Any]]:
     build_started = time.perf_counter()
     final_dir = root / "final"
@@ -1435,7 +1442,8 @@ def render_video(
         cumulative += float(timeline[index + 1]["duration_sec"])
     burn_subtitles = bool(cfg.get("burn_subtitles", False))
     if burn_subtitles:
-        subtitle_path = (final_dir / "subtitles_burn.ass").as_posix().replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
+        staged_ass = (artifacts_dir or final_dir) / "subtitles_burn.ass"
+        subtitle_path = staged_ass.as_posix().replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
         subtitle_label = "[vsub]"
         filters.append(
             f"{prior}subtitles=filename='{subtitle_path}'{subtitle_label}"
@@ -1459,7 +1467,7 @@ def render_video(
         video = preview_dir / f"{mode}_{base_name}"
     mux_started = time.perf_counter()
     run(
-        "ffmpeg", "-y", "-v", "error", "-i", str(silent), "-i", str(final_dir / "master_narration_with_tail.wav"),
+        "ffmpeg", "-y", "-v", "error", "-i", str(silent), "-i", str((artifacts_dir or final_dir) / "master_narration_with_tail.wav"),
         "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
         "-movflags", "+faststart", str(video),
     )
@@ -1586,10 +1594,10 @@ def main() -> int:
     data = json.loads(manifest.read_text(encoding="utf-8"))
     validate_manifest(root, data)
     if args.reuse_audio:
-        timeline, narration_sec, audio_sec = reuse_audio(root, data)
+        timeline, narration_sec, audio_sec, out_dir = reuse_audio(root, data, mode=args.mode)
     else:
-        timeline, narration_sec, audio_sec = build_audio(root, data, reuse_tts=args.reuse_tts)
-    video, video_sec, performance = render_video(root, data, timeline, audio_sec, mode=args.mode)
+        timeline, narration_sec, audio_sec, out_dir = build_audio(root, data, reuse_tts=args.reuse_tts, mode=args.mode)
+    video, video_sec, performance = render_video(root, data, timeline, audio_sec, mode=args.mode, artifacts_dir=out_dir)
     if args.mode == "release":
         update_episode_manifest(root, data, video, video_sec)
     print(json.dumps({
