@@ -80,7 +80,8 @@ def test_bad_sequence_or_nonpositive_duration(kwargs):
 
 
 def test_overlap_and_order_are_checked():
-    data = manifest("AB")
+    # Isolate timing from the separate word-boundary contract.
+    data = manifest("A B")
     data["cards"][1]["caption_chunks"] = ["A", "B"]
     text = srt("A", end="00:00:00,800") + "\n" + srt("B", start="00:00:00,799", index=2)
     assert "overlaps" in str(check_srt(text, data)["errors"])
@@ -99,10 +100,11 @@ def test_nonfinite_duration_fails(duration):
 
 
 def test_two_lines_for_v2_and_v3_but_legacy_v1_preserved():
-    text = srt("20\n2\n6")
-    assert not check_srt(text, manifest(version=1))["errors"]
-    assert check_srt(text, manifest(version=2))["errors"]
-    assert check_srt(text, manifest(version=3))["errors"]
+    # Three intact words test line count without also splitting a number.
+    text = srt("First\nsecond\nthird")
+    assert not check_srt(text, manifest("First second third", version=1))["errors"]
+    assert check_srt(text, manifest("First second third", version=2))["errors"]
+    assert check_srt(text, manifest("First second third", version=3))["errors"]
 
 
 @pytest.mark.parametrize("parts,term", [(["三点", "四"], "三点四"), (["Open", "AI"], "OpenAI")])

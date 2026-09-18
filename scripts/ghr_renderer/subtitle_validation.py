@@ -1,7 +1,7 @@
 """Dependency-free checks for the existing caption and SRT contracts.
 
 This checks text/timing records, not spoken pronunciation or burned-in pixels.
-Whitespace can change during wrapping; punctuation, case and digits cannot.
+Line wrapping may change whitespace, but word boundaries, punctuation, case and digits cannot.
 """
 from __future__ import annotations
 
@@ -22,6 +22,31 @@ TIMING_RE = re.compile(rf"^{STAMP}\s+-->\s+{STAMP}$")
 
 def compact(text: str) -> str:
     return "".join(unicodedata.normalize("NFC", text).split())
+
+
+def _unspaced_char(char: str) -> bool:
+    """Han characters may wrap without a word-separating space."""
+    code = ord(char)
+    return (0x3400 <= code <= 0x9FFF or 0xF900 <= code <= 0xFAFF
+            or 0x20000 <= code <= 0x323AF)
+
+
+def caption_key(text: str) -> str:
+    """Keep lexical spaces in English/numbers while allowing Han line wrapping.
+
+    Never use compact() for equality: 'now here' and 'nowhere' differ.
+    A line/page boundary between two non-Han word characters is a word break.
+    Spaces next to punctuation are layout-only here; this is not a semantic proof.
+    """
+    source = unicodedata.normalize("NFC", text).strip()
+
+    def space(match: re.Match[str]) -> str:
+        left = source[match.start() - 1] if match.start() else ""
+        right = source[match.end()] if match.end() < len(source) else ""
+        return " " if (left.isalnum() and right.isalnum()
+                       and not _unspaced_char(left) and not _unspaced_char(right)) else ""
+
+    return re.sub(r"\s+", space, source)
 
 
 def strip_voice_tags(text: str) -> str:
@@ -85,7 +110,7 @@ def expected_pages(content: dict[str, Any]) -> tuple[list[str], list[str]]:
             errors.append(f"{label}.caption_text must be a non-empty string")
             continue
         try:
-            if compact(strip_voice_tags(speech)) != compact(caption):
+            if caption_key(strip_voice_tags(speech)) != caption_key(caption):
                 errors.append(f"{label}: caption_text differs from untagged narration")
         except ValueError as exc:
             errors.append(f"{label}: {exc}")
@@ -94,7 +119,7 @@ def expected_pages(content: dict[str, Any]) -> tuple[list[str], list[str]]:
         if not isinstance(chunks, list) or not chunks or any(not isinstance(chunk, str) or not chunk.strip() for chunk in chunks):
             errors.append(f"{label}.caption_chunks must be a non-empty string list")
             continue
-        if compact("".join(chunks)) != compact(caption):
+        if caption_key("\n".join(chunks)) != caption_key(caption):
             errors.append(f"{label}: caption_chunks change caption text (including punctuation/digits)")
         broken = split_terms(chunks, terms)
         if broken:
@@ -169,7 +194,7 @@ def check_srt(text: str, content: dict[str, Any], *, duration_sec: float | None 
             errors.append(f"{label}: extends beyond media duration")
         if version >= 2 and len(cue.lines) > 2:
             errors.append(f"{label}: more than two subtitle lines")
-        if i < len(pages) and compact("".join(cue.lines)) != compact(pages[i]):
+        if i < len(pages) and caption_key("\n".join(cue.lines)) != caption_key(pages[i]):
             errors.append(f"{label}: text differs from manifest caption page")
         broken = split_terms(list(cue.lines), terms)
         if broken:

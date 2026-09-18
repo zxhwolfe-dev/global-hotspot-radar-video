@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
-from .contracts import lightweight_asset_signature, safe_resolve_asset, stable_json_hash
+from .contracts import safe_resolve_asset, sha256_file, stable_json_hash
 
 
 def default_voice_instruction(language: str) -> str:
@@ -48,7 +49,35 @@ def tts_fingerprint(data: dict[str, Any]) -> str:
     })
 
 
+def _file_stamp(stat: os.stat_result) -> tuple[int, ...]:
+    return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+
+
+def _source_content_signature(
+    path: Path,
+    memo: dict[Path, tuple[tuple[int, ...], dict[str, Any]]],
+) -> dict[str, Any]:
+    """Hash each unique source once per call; no process-wide mtime cache.
+
+    Metadata guards detect ordinary concurrent edits during this fingerprint,
+    not changes after it returns. Production still needs single-writer assets.
+    """
+    before = _file_stamp(path.stat())
+    saved = memo.get(path)
+    if saved is not None:
+        if saved[0] != before:
+            raise RuntimeError(f"source audio changed during fingerprinting: {path}")
+        return saved[1]
+    signature = {"size": before[2], "sha256": sha256_file(path)}
+    if _file_stamp(path.stat()) != before:
+        raise RuntimeError(f"source audio changed during fingerprinting: {path}")
+    memo[path] = (before, signature)
+    return signature
+
+
 def audio_fingerprint(root: Path, data: dict[str, Any]) -> str:
+    """Master v3: content-based sources and chapter identity; provider TTS stays v2."""
+    sources: dict[Path, tuple[tuple[int, ...], dict[str, Any]]] = {}
     cards: list[dict[str, Any]] = []
     for card in data.get("cards", [])[1:]:
         clip = card.get("original_clip")
@@ -56,7 +85,7 @@ def audio_fingerprint(root: Path, data: dict[str, Any]) -> str:
         if isinstance(clip, dict):
             audio_path = safe_resolve_asset(root, clip.get("audio"), label=f"original_clip audio on {card.get('id')}")
             clip_payload = {
-                "audio": lightweight_asset_signature(audio_path),
+                "audio": _source_content_signature(audio_path, sources),
                 "source_start_sec": clip.get("source_start_sec"),
                 "duration_sec": clip.get("duration_sec"),
                 "audio_volume": clip.get("audio_volume", 0.78),
@@ -73,7 +102,11 @@ def audio_fingerprint(root: Path, data: dict[str, Any]) -> str:
         })
     video = data.get("video") or {}
     return stable_json_hash({
-        "contract": "global-hotspot-master-audio-v2",
+        "contract": "global-hotspot-master-audio-v3",
+        "timeline_story_ids": [
+            str(card.get("story_id", "intro" if index == 0 else card.get("id")))
+            for index, card in enumerate(data.get("cards", []))
+        ],
         "tts_fingerprint": tts_fingerprint(data),
         "cards": cards,
         "pre_roll_seconds": video.get("pre_roll_seconds", 0.35),
