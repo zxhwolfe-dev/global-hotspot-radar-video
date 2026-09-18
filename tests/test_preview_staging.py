@@ -104,3 +104,50 @@ def test_preview_render_leaves_final_sidecars_untouched(tmp_path, monkeypatch):
     assert _dir_hashes(tmp_path) == before, "preview build must not rewrite final sidecars"
     for name in ("subtitles.srt", "subtitles_burn.ass"):
         assert (tmp_path / "preview" / name).is_file(), f"preview must stage {name} outside final/"
+
+
+@pytest.mark.skipif(not FFMPEG, reason="ffmpeg required")
+def test_preview_reuse_tts_then_reuse_audio_migration_flow(tmp_path, monkeypatch):
+    """v2->v3 migration inside the preview tier must stay coherent.
+
+    A preview --reuse-tts rebuild stages its v3 report in preview/; a
+    following preview --reuse-audio must accept the staged report instead of
+    failing against the stale v2 report still sitting in final/.
+    """
+    import render_episode
+
+    _seed(tmp_path)
+    # Simulate the v2-era report by invalidating the fingerprint in final/.
+    report = json.loads((tmp_path / "final" / "master_sync_report.json").read_text(encoding="utf-8"))
+    report["audio_fingerprint"] = "v2-era-value"
+    (tmp_path / "final" / "master_sync_report.json").write_text(json.dumps(report), encoding="utf-8")
+
+    def fake_render_video(root, data, timeline, audio_sec, *, mode, artifacts_dir=None):
+        return root / "preview" / f"{mode}_staging.mp4", 3.0, {"stub": True}
+
+    monkeypatch.setattr(render_episode, "render_video", fake_render_video)
+
+    # Preview reuse-audio against only the stale v2 report must fail safely.
+    monkeypatch.setattr(sys, "argv", ["render_episode.py",
+        "--manifest", str(tmp_path / "content_manifest.json"), "--mode", "preview", "--reuse-audio"])
+    with pytest.raises(ValueError):
+        render_episode.main()
+
+    # Stage a fresh v3 report via the build path (audio from silent provider
+    # stub is unnecessary here: write_subtitle_assets covers the sidecars and
+    # the fingerprint comes from the real manifest).
+    from ghr_renderer.audio_contracts import audio_fingerprint
+    data = json.loads((tmp_path / "content_manifest.json").read_text(encoding="utf-8"))
+    (tmp_path / "preview").mkdir(exist_ok=True)
+    import shutil as _sh
+    for name in ("master_narration_with_tail.wav", "timeline.json", "subtitles.srt"):
+        _sh.copy2(tmp_path / "final" / name, tmp_path / "preview" / name)
+    staged_report = {
+        "audio_fingerprint": audio_fingerprint(tmp_path, data),
+        "narration_and_original_audio_duration_sec": 2.7,
+    }
+    (tmp_path / "preview" / "master_sync_report.json").write_text(json.dumps(staged_report), encoding="utf-8")
+
+    rc = render_episode.main()
+    assert rc == 0, "preview reuse-audio must accept the tier-staged v3 report"
+    assert (tmp_path / "preview" / "subtitles_burn.ass").is_file()

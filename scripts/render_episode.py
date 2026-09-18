@@ -656,12 +656,31 @@ def build_audio(root: Path, data: dict[str, Any], *, reuse_tts: bool = False, mo
 
 
 def reuse_audio(root: Path, data: dict[str, Any], *, mode: str = "release") -> tuple[list[dict[str, Any]], float, float, Path]:
-    timeline_path = root / "final" / "timeline.json"
-    audio_path = root / "final" / "master_narration_with_tail.wav"
-    report_path = root / "final" / "master_sync_report.json"
-    for path in (timeline_path, audio_path, report_path, root / "final" / "subtitles.srt"):
-        if not path.is_file():
-            raise FileNotFoundError(f"--reuse-audio requires {path}")
+    # Prefer the artifacts staged for the tier being rendered (a preview or
+    # candidate --reuse-tts run writes its report next to its own tier); fall
+    # back to the committed release artifacts in final/ when no staged copy
+    # exists yet. This keeps the v2->v3 migration path working in every mode.
+    out_dir = root / "final" if mode == "release" else root / "preview"
+    candidates = [
+        (out_dir / "timeline.json", out_dir / "master_narration_with_tail.wav",
+         out_dir / "master_sync_report.json", out_dir / "subtitles.srt"),
+        (root / "final" / "timeline.json", root / "final" / "master_narration_with_tail.wav",
+         root / "final" / "master_sync_report.json", root / "final" / "subtitles.srt"),
+    ]
+    chosen = next(
+        (
+            group
+            for group in candidates
+            if all(path.is_file() for path in group)
+        ),
+        None,
+    )
+    if chosen is None:
+        raise FileNotFoundError(
+            "--reuse-audio requires timeline.json, master_narration_with_tail.wav, "
+            "master_sync_report.json and subtitles.srt (staged tier or final)"
+        )
+    timeline_path, audio_path, report_path, _ = chosen
     timeline = json.loads(timeline_path.read_text(encoding="utf-8"))
     if [item.get("id") for item in timeline] != [card.get("id") for card in data["cards"]]:
         raise ValueError("saved audio timeline card IDs do not match the current manifest")
@@ -669,9 +688,8 @@ def reuse_audio(root: Path, data: dict[str, Any], *, mode: str = "release") -> t
     expected = audio_fingerprint(root, data)
     if report.get("audio_fingerprint") != expected:
         raise ValueError("saved audio does not match the current narration, voice, timing, source audio, or mix settings")
-    # The release master in final/ stays authoritative and read-only here;
-    # rebuilt subtitle assets stage next to the tier being rendered.
-    out_dir = root / "final" if mode == "release" else root / "preview"
+    # The chosen master stays read-only here; rebuilt subtitle assets stage
+    # next to the tier being rendered so a preview pass never edits final/.
     out_dir.mkdir(parents=True, exist_ok=True)
     write_subtitle_assets(out_dir, data, timeline)
     return timeline, float(report["narration_and_original_audio_duration_sec"]), duration(audio_path), out_dir
