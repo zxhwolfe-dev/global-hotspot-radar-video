@@ -16,7 +16,7 @@ import time
 import wave
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, TYPE_CHECKING
 
 import cv2
 import numpy as np
@@ -32,10 +32,11 @@ except ImportError:  # pragma: no cover - basic regex fallback remains available
 REPO = Path(os.environ.get("GHR_REPO_ROOT", "/home/zxhwolfe/project/akaiagents")).expanduser().resolve()
 sys.path.insert(0, str(REPO))
 
-from ai_douyin_video_pipeline.tts_provider import (
-    AliyunQwenAudioTTS,
-    AliyunTTSConfig,
-)
+if TYPE_CHECKING:
+    from ai_douyin_video_pipeline.tts_provider import AliyunTTSConfig
+
+from ghr_renderer.audio_artifacts import audio_write, output_directory, select_bundle, stage_bundle
+from ghr_renderer.episode_lock import episode_lock
 from ghr_renderer.compositor import composite, load_premultiplied, shadow_layer, transform_layer
 from ghr_renderer.audio_contracts import (
     audio_fingerprint,
@@ -373,7 +374,20 @@ def validate_manifest(root: Path, data: dict[str, Any]) -> None:
                 raise ValueError(f"original_clip {key} range exceeds source duration on {card['id']}")
 
 
+def _load_tts_provider() -> tuple[Any, Any]:
+    """Only fresh synthesis requires the host provider module and credentials."""
+    try:
+        from ai_douyin_video_pipeline.tts_provider import AliyunQwenAudioTTS, AliyunTTSConfig
+    except ImportError as exc:
+        raise RuntimeError(
+            "Fresh TTS requires the Akai provider module; set GHR_REPO_ROOT to the host repository. "
+            "Existing --reuse-audio/--reuse-tts caches can be used offline."
+        ) from exc
+    return AliyunQwenAudioTTS, AliyunTTSConfig
+
+
 def load_tts_config(data: dict[str, Any]) -> AliyunTTSConfig:
+    _, AliyunTTSConfig = _load_tts_provider()
     load_dotenv(REPO / ".env")
     if not os.getenv("DASHSCOPE_API_KEY"):
         fallback = os.getenv("AI_DOUYIN_ALIYUN_KEY") or os.getenv("QWEN_API_KEY")
@@ -395,10 +409,15 @@ def load_tts_config(data: dict[str, Any]) -> AliyunTTSConfig:
 
 
 def build_audio(root: Path, data: dict[str, Any], *, reuse_tts: bool = False, mode: str = "release") -> tuple[list[dict[str, Any]], float, float, Path]:
+    with audio_write(output_directory(root, mode)):
+        return _build_audio(root, data, reuse_tts=reuse_tts, mode=mode)
+
+
+def _build_audio(root: Path, data: dict[str, Any], *, reuse_tts: bool, mode: str) -> tuple[list[dict[str, Any]], float, float, Path]:
     audio_dir = root / "audio"
     # Lower tiers stage their sidecar artifacts outside final/ so a preview or
     # candidate pass after a release never rewrites committed files.
-    out_dir = root / "final" if mode == "release" else root / "preview"
+    out_dir = output_directory(root, mode)
     out_dir.mkdir(parents=True, exist_ok=True)
     work = root / "temp" / "audio"
     if work.exists():
@@ -415,7 +434,7 @@ def build_audio(root: Path, data: dict[str, Any], *, reuse_tts: bool = False, mo
         if normalized(plain) != normalized(str(card.get("caption_text") or "")):
             raise ValueError(f"caption mismatch: {card['id']}")
 
-    config = load_tts_config(data)
+    effective_voice = voice_identity(data)
     combined = audio_dir / "narration_combined.mp3"
     timings_path = audio_dir / "line_timings.json"
     tts_meta_path = audio_dir / "tts_cache_meta.json"
@@ -434,6 +453,9 @@ def build_audio(root: Path, data: dict[str, Any], *, reuse_tts: bool = False, mo
             for row in saved_rows
         ]
     else:
+        config = load_tts_config(data)
+        AliyunQwenAudioTTS, _ = _load_tts_provider()
+        effective_voice = {"model": config.model, "voice": config.voice, "instruction": config.instruction}
         provider_timings = AliyunQwenAudioTTS(config).synthesize(
             "\n".join(str(card["tts_text"]) for card in speech_cards), combined
         )
@@ -613,25 +635,12 @@ def build_audio(root: Path, data: dict[str, Any], *, reuse_tts: bool = False, mo
         "-ar", "48000", "-ac", "1", "-c:a", "pcm_s16le", str(master),
     )
     audio_sec = duration(master)
-    protected_terms = tuple(str(term) for term in (data.get("video", {}).get("subtitle_keep_terms") or []))
-    write_srt(cues, out_dir / "subtitles.srt", protected_terms=protected_terms)
-    video_cfg = data.get("video") or {}
-    write_single_box_ass(
-        cues,
-        out_dir / "subtitles_burn.ass",
-        width=int(video_cfg.get("width", 1080)),
-        height=int(video_cfg.get("height", 1920)),
-        font_name=str(video_cfg.get("subtitle_font") or "Microsoft YaHei"),
-        font_size=float(video_cfg.get("subtitle_font_size", 50)),
-        margin_h=float(video_cfg.get("subtitle_margin_h", 82)),
-        margin_v=float(video_cfg.get("subtitle_margin_v", 250)),
-        wrapped_texts=[wrap_srt_caption(str(cue["text"]), protected_terms=protected_terms) for cue in cues],
-    )
+    write_subtitle_assets(out_dir, data, timeline)
     (out_dir / "timeline.json").write_text(json.dumps(timeline, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     timings_path.write_text(json.dumps(rows, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     report = {
         "status": "PASS", "project": data.get("project"), "provider": "aliyun_qwen_audio",
-        "model": config.model, "voice": config.voice, "instruction": config.instruction,
+        "model": effective_voice["model"], "voice": effective_voice["voice"], "instruction": effective_voice["instruction"],
         "pre_roll_sec": pre_roll, "narration_and_original_audio_duration_sec": round(current - pre_roll, 3),
         "tail_hold_sec": tail, "master_audio_duration_sec": round(audio_sec, 3),
         "card_count": len(data["cards"]), "speech_unit_count": len(speech_cards),
@@ -656,43 +665,15 @@ def build_audio(root: Path, data: dict[str, Any], *, reuse_tts: bool = False, mo
 
 
 def reuse_audio(root: Path, data: dict[str, Any], *, mode: str = "release") -> tuple[list[dict[str, Any]], float, float, Path]:
-    # Prefer the artifacts staged for the tier being rendered (a preview or
-    # candidate --reuse-tts run writes its report next to its own tier); fall
-    # back to the committed release artifacts in final/ when no staged copy
-    # exists yet. This keeps the v2->v3 migration path working in every mode.
-    out_dir = root / "final" if mode == "release" else root / "preview"
-    candidates = [
-        (out_dir / "timeline.json", out_dir / "master_narration_with_tail.wav",
-         out_dir / "master_sync_report.json", out_dir / "subtitles.srt"),
-        (root / "final" / "timeline.json", root / "final" / "master_narration_with_tail.wav",
-         root / "final" / "master_sync_report.json", root / "final" / "subtitles.srt"),
-    ]
-    chosen = next(
-        (
-            group
-            for group in candidates
-            if all(path.is_file() for path in group)
-        ),
-        None,
-    )
-    if chosen is None:
-        raise FileNotFoundError(
-            "--reuse-audio requires timeline.json, master_narration_with_tail.wav, "
-            "master_sync_report.json and subtitles.srt (staged tier or final)"
-        )
-    timeline_path, audio_path, report_path, _ = chosen
-    timeline = json.loads(timeline_path.read_text(encoding="utf-8"))
-    if [item.get("id") for item in timeline] != [card.get("id") for card in data["cards"]]:
-        raise ValueError("saved audio timeline card IDs do not match the current manifest")
-    report = json.loads(report_path.read_text(encoding="utf-8"))
     expected = audio_fingerprint(root, data)
-    if report.get("audio_fingerprint") != expected:
-        raise ValueError("saved audio does not match the current narration, voice, timing, source audio, or mix settings")
-    # The chosen master stays read-only here; rebuilt subtitle assets stage
-    # next to the tier being rendered so a preview pass never edits final/.
+    source_dir, timeline, report, audio_sec = select_bundle(root, data, expected, mode, duration)
+    out_dir = output_directory(root, mode)
+    # Materialize the SAME validated core bundle beside the rebuilt subtitles.
+    # The renderer consumes only this directory; it must not pick a different WAV.
+    stage_bundle(source_dir, out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     write_subtitle_assets(out_dir, data, timeline)
-    return timeline, float(report["narration_and_original_audio_duration_sec"]), duration(audio_path), out_dir
+    return timeline, float(report["narration_and_original_audio_duration_sec"]), audio_sec, out_dir
 
 
 def write_subtitle_assets(out_dir: Path, data: dict[str, Any], timeline: list[dict[str, Any]]) -> None:
@@ -1546,7 +1527,8 @@ def render_video(
     report = {
         "status": "PASS", "renderer": str(Path(__file__).resolve()), "render_mode": mode,
         "video": str(video), "cover": None if cover_png is None else str(cover_png),
-        "subtitle_sidecar": str(final_dir / "subtitles.srt"), "subtitles_burned": burn_subtitles,
+        "subtitle_sidecar": str((artifacts_dir or final_dir) / "subtitles.srt"), "subtitles_burned": burn_subtitles,
+        "master_audio": str((artifacts_dir or final_dir) / "master_narration_with_tail.wav"),
         "card_count": len(data["cards"]),
         "distinct_generated_images": len({card["image"] for card in data["cards"]}),
         "video_duration_sec": round(video_sec, 3), "audio_duration_sec": round(audio_sec, 3),
@@ -1610,14 +1592,15 @@ def main() -> int:
     manifest = args.manifest.resolve()
     root = manifest.parent
     data = json.loads(manifest.read_text(encoding="utf-8"))
-    validate_manifest(root, data)
-    if args.reuse_audio:
-        timeline, narration_sec, audio_sec, out_dir = reuse_audio(root, data, mode=args.mode)
-    else:
-        timeline, narration_sec, audio_sec, out_dir = build_audio(root, data, reuse_tts=args.reuse_tts, mode=args.mode)
-    video, video_sec, performance = render_video(root, data, timeline, audio_sec, mode=args.mode, artifacts_dir=out_dir)
-    if args.mode == "release":
-        update_episode_manifest(root, data, video, video_sec)
+    with episode_lock(root):
+        validate_manifest(root, data)
+        if args.reuse_audio:
+            timeline, narration_sec, audio_sec, out_dir = reuse_audio(root, data, mode=args.mode)
+        else:
+            timeline, narration_sec, audio_sec, out_dir = build_audio(root, data, reuse_tts=args.reuse_tts, mode=args.mode)
+        video, video_sec, performance = render_video(root, data, timeline, audio_sec, mode=args.mode, artifacts_dir=out_dir)
+        if args.mode == "release":
+            update_episode_manifest(root, data, video, video_sec)
     print(json.dumps({
         "video": str(video), "video_duration_sec": round(video_sec, 3),
         "narration_and_source_duration_sec": round(narration_sec, 3),
