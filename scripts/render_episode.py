@@ -666,7 +666,42 @@ def reuse_audio(root: Path, data: dict[str, Any]) -> tuple[list[dict[str, Any]],
     expected = audio_fingerprint(root, data)
     if report.get("audio_fingerprint") != expected:
         raise ValueError("saved audio does not match the current narration, voice, timing, source audio, or mix settings")
+    write_subtitle_assets(root, data, timeline)
     return timeline, float(report["narration_and_original_audio_duration_sec"]), duration(audio_path)
+
+
+def write_subtitle_assets(root: Path, data: dict[str, Any], timeline: list[dict[str, Any]]) -> None:
+    """Write final/subtitles.srt and subtitles_burn.ass from verified spoken
+    boundaries and the *current* video settings.
+
+    Both build_audio and --reuse-audio go through here so subtitle layout
+    (font, margins, protected terms) is never silently reused stale; the
+    audio fingerprint deliberately excludes these text-only settings.
+    """
+    final_dir = root / "final"
+    cards_by_id = {card.get("id"): card for card in data.get("cards", [])}
+    cues: list[dict[str, Any]] = []
+    for row in timeline:
+        card = cards_by_id.get(row.get("id"))
+        if card is None or not str(card.get("tts_text") or "").strip():
+            continue
+        cues.extend(build_caption_cues(card, float(row["start_sec"]), float(row["spoken_end_sec"])))
+    if not cues:
+        raise ValueError("timeline contains no spoken cards; refusing to write empty subtitle assets")
+    video_cfg = data.get("video") or {}
+    protected_terms = tuple(str(term) for term in (video_cfg.get("subtitle_keep_terms") or []))
+    write_srt(cues, final_dir / "subtitles.srt", protected_terms=protected_terms)
+    write_single_box_ass(
+        cues,
+        final_dir / "subtitles_burn.ass",
+        width=int(video_cfg.get("width", 1080)),
+        height=int(video_cfg.get("height", 1920)),
+        font_name=str(video_cfg.get("subtitle_font") or "Microsoft YaHei"),
+        font_size=float(video_cfg.get("subtitle_font_size", 50)),
+        margin_h=float(video_cfg.get("subtitle_margin_h", 82)),
+        margin_v=float(video_cfg.get("subtitle_margin_v", 250)),
+        wrapped_texts=[wrap_srt_caption(str(cue["text"]), protected_terms=protected_terms) for cue in cues],
+    )
 
 
 def transition_plan(data: dict[str, Any], timeline: list[dict[str, Any]]) -> list[dict[str, Any]]:
