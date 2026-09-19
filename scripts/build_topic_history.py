@@ -16,6 +16,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
+from history_store import merge_history, write_atomic, selected_groups
+
 DEFAULT_CATALOGUE = Path(
     os.environ.get("GHR_WORK_ROOT", "/mnt/d/AIWorkstationData/creative_work/videos")
 ).expanduser().resolve()
@@ -106,7 +108,13 @@ def episode_events(root: Path) -> list[dict[str, Any]]:
     date = infer_date(root, data)
     rows: list[dict[str, Any]] = []
 
-    if isinstance(data.get("topic"), str) and data.get("topic", "").strip() and isinstance(data.get("sources"), list):
+    try:
+        selected = selected_groups(root, data)
+    except (OSError, ValueError, TypeError) as exc:
+        return [{"_error": f"{root}: {exc}"}]
+    if selected is not None:
+        groups = selected
+    elif isinstance(data.get("topic"), str) and data.get("topic", "").strip() and isinstance(data.get("sources"), list):
         groups = [(str(data["topic"]).strip(), [data])]
     elif isinstance(data.get("selection"), list):
         groups = [(str(item.get("topic") or item.get("title") or "untitled"), [item]) for item in data["selection"]]
@@ -273,18 +281,19 @@ def query(index: dict[str, Any], text: str, url: str, limit: int) -> list[dict[s
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--catalogue", type=Path, default=DEFAULT_CATALOGUE)
-    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
+    parser.add_argument("--output", type=Path, default=None)
     parser.add_argument("--query", default="", help="Candidate topic title to compare")
     parser.add_argument("--url", default="", help="Candidate source URL to compare")
     parser.add_argument("--limit", type=int, default=8)
     parser.add_argument("--no-write", action="store_true")
     args = parser.parse_args()
-    index = build(args.catalogue.resolve())
+    output = args.output or args.catalogue.resolve() / DEFAULT_OUTPUT.name
+    previous = json.loads(output.read_text(encoding="utf-8")) if output.exists() else {"topics": []}
+    index = merge_history(build(args.catalogue.resolve()), previous, related, normalize_text)
     if not args.no_write:
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(json.dumps(index, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        write_atomic(output, index)
     result: dict[str, Any] = {
-        "index": None if args.no_write else str(args.output),
+        "index": None if args.no_write else str(output),
         "episodes_scanned": index["episodes_scanned"],
         "topic_count": index["topic_count"],
         "errors": index["errors"],

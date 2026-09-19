@@ -54,6 +54,7 @@ from ghr_renderer.motion import (
     scene_v2_state,
 )
 from ghr_renderer.quality import analyze_motion_plan
+from ghr_renderer.production_contracts import manifest_errors, timing_errors
 from ghr_renderer.subtitles import write_single_box_ass
 
 SUPPORTED_TAGS = {
@@ -276,6 +277,9 @@ def audible_bounds(path: Path, *, threshold_db: float = -55.0) -> tuple[float, f
 
 
 def validate_manifest(root: Path, data: dict[str, Any]) -> None:
+    production_errors = manifest_errors(data)
+    if production_errors:
+        raise ValueError("; ".join(production_errors))
     cards = data.get("cards")
     if not isinstance(cards, list) or len(cards) < 2:
         raise ValueError("content_manifest cards must include a silent cover and at least one spoken card")
@@ -1205,6 +1209,9 @@ def render_video(
     mode: str,
     artifacts_dir: Path | None = None,
 ) -> tuple[Path, float, dict[str, Any]]:
+    pacing_errors = timing_errors(data, timeline)
+    if pacing_errors:
+        raise ValueError("; ".join(pacing_errors))
     build_started = time.perf_counter()
     final_dir = root / "final"
     preview_dir = root / "preview"
@@ -1593,6 +1600,11 @@ def main() -> int:
     root = manifest.parent
     data = json.loads(manifest.read_text(encoding="utf-8"))
     with episode_lock(root):
+        if "production_contract_version" in data:
+            from preflight_episode import check_project
+            report = check_project(root, require_research=True, require_production=True)
+            if report["errors"]:
+                raise ValueError("; ".join(report["errors"]))
         validate_manifest(root, data)
         if args.reuse_audio:
             timeline, narration_sec, audio_sec, out_dir = reuse_audio(root, data, mode=args.mode)

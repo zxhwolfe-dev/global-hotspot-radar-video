@@ -12,6 +12,7 @@ from typing import Any
 
 from ghr_renderer.subtitle_validation import check_srt
 from preflight_episode import check_project, read_object
+from ghr_renderer.production_contracts import timing_errors
 
 
 def scan_episode(root: Path) -> dict[str, Any]:
@@ -82,10 +83,10 @@ def trailing_silence(path: Path, duration_sec: float) -> float | None:
     return end - starts[-1]
 
 
-def _validate(root: Path, *, require_research: bool = False) -> dict[str, Any]:
+def _validate(root: Path, *, require_research: bool = False, require_production: bool = False) -> dict[str, Any]:
     errors: list[str] = []
     warnings: list[str] = []
-    preflight = check_project(root, require_research=require_research)
+    preflight = check_project(root, require_research=require_research, require_production=require_production)
     checks: dict[str, Any] = {"preflight": preflight}
     errors.extend(preflight["errors"])
     warnings.extend(preflight["warnings"])
@@ -106,6 +107,8 @@ def _validate(root: Path, *, require_research: bool = False) -> dict[str, Any]:
         return {"status": "FAIL", "root": str(root), "errors": errors, "warnings": warnings, "checks": checks}
 
     content = read_json(required["content_manifest"])
+    if "production_contract_version" in content:
+        errors.extend(timing_errors(content, read_json(root / "final" / "timeline.json")))
     quality_contract_version = int(content.get("quality_contract_version", 1)) if isinstance(content, dict) else 1
     if quality_contract_version >= 2:
         selection_report = root / "selection_report.json"
@@ -308,10 +311,10 @@ def _validate(root: Path, *, require_research: bool = False) -> dict[str, Any]:
     }
 
 
-def validate(root: Path, *, require_research: bool = False) -> dict[str, Any]:
+def validate(root: Path, *, require_research: bool = False, require_production: bool = False) -> dict[str, Any]:
     """Report corrupt input/tool failures as FAIL instead of leaving a stale PASS."""
     try:
-        return _validate(root.resolve(), require_research=require_research)
+        return _validate(root.resolve(), require_research=require_research, require_production=require_production)
     except (OSError, UnicodeError, ValueError, TypeError, KeyError, AttributeError,
             OverflowError, ZeroDivisionError, subprocess.SubprocessError) as exc:
         return {"status": "FAIL", "root": str(root), "errors": [
@@ -324,8 +327,9 @@ def main() -> int:
     parser.add_argument("episode_root", type=Path)
     parser.add_argument("--json-output", type=Path)
     parser.add_argument("--require-research", action="store_true", help="Require P0 research records for a new episode")
+    parser.add_argument("--require-production", action="store_true", help="Require current voice, visual and card duration contract")
     args = parser.parse_args()
-    report = validate(args.episode_root.resolve(), require_research=args.require_research)
+    report = validate(args.episode_root.resolve(), require_research=args.require_research, require_production=args.require_production)
     rendered = json.dumps(report, ensure_ascii=False, indent=2)
     print(rendered)
     if args.json_output:

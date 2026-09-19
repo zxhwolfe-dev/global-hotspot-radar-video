@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from check_selection_research import check as check_research
+from ghr_renderer.production_contracts import manifest_errors
 from ghr_renderer.contracts import safe_resolve_asset
 from ghr_renderer.subtitle_validation import expected_pages
 
@@ -26,7 +27,7 @@ def read_object(path: Path) -> dict[str, Any]:
     return value
 
 
-def check_project(root: Path, *, require_research: bool = False) -> dict[str, Any]:
+def check_project(root: Path, *, require_research: bool = False, require_production: bool = False) -> dict[str, Any]:
     root = root.resolve()
     errors: list[str] = []
     warnings: list[str] = []
@@ -58,6 +59,7 @@ def check_project(root: Path, *, require_research: bool = False) -> dict[str, An
 
     try:
         content = load("content_manifest.json")
+        errors.extend(manifest_errors(content, require=require_production))
         video = content.get("video")
         if not isinstance(video, dict):
             raise ValueError("content_manifest.video must be an object")
@@ -134,8 +136,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("episode_root", type=Path)
     parser.add_argument("--require-research", action="store_true", help="Require the P0 research contract for new episodes")
+    parser.add_argument("--require-production", action="store_true", help="Require current voice and visual production contract")
     args = parser.parse_args()
-    report = check_project(args.episode_root, require_research=args.require_research)
+    report = check_project(args.episode_root, require_research=args.require_research, require_production=args.require_production)
     print(json.dumps(report, ensure_ascii=False, indent=2))
     return 2 if report["status"] == "FAIL" else 0
 

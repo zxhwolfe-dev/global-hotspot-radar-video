@@ -45,12 +45,13 @@
 {
   "project": "全球热点雷达｜日期与语言",
   "quality_contract_version": 3,
+  "production_contract_version": 1,
   "language": "zh-CN",
   "voice": {
     "provider": "alibaba_qwen_tts",
     "model": "qwen-audio-3.0-tts-plus",
     "voice": "longanlingxin",
-    "instruction": "可选：本期整体声音导演说明"
+    "instruction": "中速偏快、利落流畅、句内推进感强、不拖长句尾；数字与专名清楚，不吞尾、不抢句"
   },
   "video": {
     "width": 1080,
@@ -208,13 +209,13 @@
 
 ## 系列选题历史索引
 
-每次选题宽筛前重建索引：
+每次选题宽筛前增量合并索引：
 
 ```bash
 .venv/bin/python /home/zxhwolfe/.codex/skills/global-hotspot-radar-video/scripts/build_topic_history.py
 ```
 
-默认扫描 `/mnt/d/AIWorkstationData/creative_work/videos/` 中全部全球热点项目，把历史不同 `source_manifest.json` 结构统一为：事件标签、标准化源 URL、Radar ID、中英文出现记录、首次/最近出现日期。输出为：
+默认保留已有索引全部历史题、手工字段与稳定 topic_id，再扫描 `/mnt/d/AIWorkstationData/creative_work/videos/` 中全部全球热点项目，把历史不同 `source_manifest.json` 结构统一为：事件标签、标准化源 URL、Radar ID、中英文出现记录、首次/最近出现日期。输出为：
 
 ```text
 /mnt/d/AIWorkstationData/creative_work/videos/global_hotspot_topic_history.json
@@ -249,3 +250,13 @@
 ```
 
 脚本实测当前 FFmpeg 暴露的 H.264 编码器，不因为机器存在 NVIDIA GPU 就假设 NVENC 可用。硬件编码器只有在 FFmpeg 列出且基准通过时才可启用；否则三档继续使用 `libx264`。不要为提速降低内容审核范围。
+
+## 当前生产偏好合同
+
+新制作必须设置 `production_contract_version: 1`（与质量V3、研究V1独立）。首次渲染前运行 `preflight_episode.py <项目> --require-research --require-production`；终检运行 `validate_episode.py <项目> --require-research --require-production`，避免缺失新合同却只按旧项目检查。
+
+- `voice.instruction` 显式包含 `中速偏快、利落流畅`，英文配音也可用这段导演要求并补充自然英文表演说明。不能以默认值代替 manifest 的明确记录。
+- 非 intro 口播卡增加 `visual_anchor` 字符串，写明遮住字幕仍能读到的事实、数字、对照或证据，例如“7秒与41秒的实测耗时对照，注明单次测试”。现场镜头写明动作及证据意义。该字段只是策划记录，不证明实际图像合格。
+- TTS 后、视频编码前与终检读取实测 `timeline.json`：每卡起止时间包含停顿、原声窗口、末卡0.8秒片尾，均≤12秒；相邻同一静态图累计也≤12秒。字幕分页和换ID不能规避。预估不足不自动提速、裁断或重复付费，保存已有音频后停止，按语义拆卡。
+- 新合同直接渲染会在TTS前强制研究/生产预检；旧文件不回写，未启用合同的旧项目可只读复核，但不代表满足新偏好。缺失/非法合同版本不会被当作已通过。
+- 历史索引默认合并，`--no-write` 也按合并结果查重；`--catalogue` 自定义时输出默认随目录，不意外写入全局索引。现有索引损坏时拒绝覆盖，写入采用同目录原子替换。

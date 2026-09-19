@@ -4,9 +4,9 @@
 
 ## 能力总览
 
-- **选题**：接入实时全球热点 Radar 大样本扫描（目标 300–800 条/日），中英文独立出候选与推荐，历史查重索引防重复，外部一手信源核验后才进推荐。
-- **文案**：事实编辑 → 结构编辑 → 文字编辑三轮流程，材料身份归属（作者/助手/第三方/推断/模拟/未知），去模板化与"换题仍成立"筛查；中文固定开场与 0.8 秒片尾，英文独立成稿不互译。
-- **视觉**：高端国际新闻杂志 + 手撕纸 + 印刷肌理的系列识别；每题按题材重建构图与配色；生成图逐字视觉复核；语义动效（scene_v2：预备-行动-收势-稳定阅读）。
+- **选题**：接入实时全球热点 Radar 大样本扫描（目标 300–800 条/日），中英文独立出候选与推荐，历史查重索引防重复，比较站外热榜与官方/权威新闻网站，原文核验后才进推荐；没有合适Radar题可全部采用站外来源。
+- **文案**：事实编辑 → 结构编辑 → 文字编辑三轮流程，材料身份归属（作者/助手/第三方/推断/模拟/未知），去模板化与"换题仍成立"筛查；直入主题的开场与固定 0.8 秒片尾，英文独立成稿不互译。
+- **视觉**：高端国际新闻杂志 + 手撕纸 + 印刷肌理的系列识别；每题按题材重建构图与配色；每卡≤12秒并有可读信息，生图先复用、逐字视觉复核；按需采用语义动效（scene_v2：预备-行动-收势-稳定阅读）。
 - **原声素材**：片源定位 → 入库水印门禁（全片联系表 + 四角放大）→ 真实首帧预填裱框窗口 → 播放回落同帧；引用时间码与权利状态全记录。
 - **渲染**：共享渲染器 `scripts/render_episode.py`，每期只写 manifest 与素材；preview/candidate/release 三档 + 内容寻址缓存 + `--reuse-tts/--reuse-audio` 局部返工。
 - **验证**：`scripts/validate_episode.py` 确定性终检（字幕、片尾、动效质量、视觉风险预警、审核文件齐全性）+ 发布工作台只读识别。
@@ -36,17 +36,24 @@ tests/                          # 渲染基础测试
 ## 快速使用
 
 ```bash
-# 重建选题查重索引
+# 增量合并选题查重索引（保留手工恢复的历史）
 python scripts/build_topic_history.py
 
-# 渲染一期（先 preview 校对，再 candidate，最后 release）
+# 新项目启用production_contract_version: 1，先只读预检
+python scripts/preflight_episode.py <项目> --require-research --require-production
+
+# 仅预检退出码为0后继续（先 preview 校对，再 candidate，最后 release）
 python scripts/render_episode.py --manifest <项目>/content_manifest.json --mode preview
 python scripts/render_episode.py --manifest <项目>/content_manifest.json --mode candidate --reuse-audio
 python scripts/render_episode.py --manifest <项目>/content_manifest.json --mode release --reuse-audio
 
 # 终检（会自动跑视觉风险扫描）
-python scripts/validate_episode.py <项目目录>
+python scripts/validate_episode.py <项目目录> --require-research --require-production
 ```
+
+新制作的 `voice.instruction` 显式写入“中速偏快、利落流畅”；非intro口播卡填写 `visual_anchor`。实测时间线每卡（含停顿、原声和末卡片尾）≤12秒，相邻同静态图累计也≤12秒。旧项目保持兼容，不自动回写。完整字段见 [automation_contracts.md](references/automation_contracts.md)。
+
+验证不调用付费提供者：使用现有Python环境运行 `python -m pytest -q tests`。本仓库没有部署工作流，推送源码不发布视频。
 
 依赖：Python 3.10+、ffmpeg/ffprobe、Pillow、numpy、jieba（字幕断行）、requests、python-dotenv；TTS 走阿里云 qwen-audio（环境变量供密钥）；换机器用 `GHR_REPO_ROOT` / `GHR_WORK_ROOT` 覆盖默认路径。
 

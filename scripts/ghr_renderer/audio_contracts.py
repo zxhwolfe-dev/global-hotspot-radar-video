@@ -11,12 +11,12 @@ def default_voice_instruction(language: str) -> str:
     if language.lower().startswith("zh"):
         return (
             "像经验丰富、做过事实核查的女性新闻编辑一样播报：可信、具体、通俗自然，不使用广告腔或AI总结腔。"
-            "整体采用舒展的自然中速；关键事实、数字、来源限定和转折处主动停顿，句间保留完整呼吸。"
+            "整体中速偏快、利落流畅、句内推进感强，不拖长句尾；数字、专名与限定清楚，句间自然换气，不吞尾、不抢句。"
             "按内容克制地切换好奇、兴奋、严肃和共情，执行所有情绪与拟声标签但绝不读出标签。"
         )
     return (
         "Sound like an experienced female news editor who has checked the primary material: credible, specific, "
-        "conversational, and never promotional or AI-summary-like. Use an unhurried natural pace, pause on evidence, "
+        "conversational, and never promotional or AI-summary-like. Use a brisk, fluent medium-fast pace without trailing sentence endings; clarify evidence, "
         "numbers, attribution, and turns, preserve full breaths between units, vary emotion with restraint, and perform "
         "every supported emotion or sound tag without reading the tag aloud."
     )

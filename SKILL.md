@@ -17,7 +17,8 @@ description: Select, verify, script, source, produce, and validate the “全球
 2. **制作已确认选题**：用户已确认题目或顺序时，保持题目身份，直接深研、写稿、取材和制作，不重新换题。
 3. **选题后全自动制作**：仅在用户明确要求无需确认、自动完成时使用。
 4. **修订成片**：先定位内容、视觉、语音、素材或发布契约的根因，只重做受影响阶段。
-5. **文案专项审查**：按用户范围回看近期实际口播、事实底稿和反馈，举证根因，按任务做局改或完整对照与复核，再合并必要规则。材料身份、独立价值与编辑顺序见 `editorial_platforms.md`；缺文件或未完成的检查如实记录。此模式不启动选题扫描、不生成素材、不覆盖原成品，交付审查、对照稿和下一期检验记录。
+5. **流程与代码审查**：用户要求先优化规则、提示词或脚本时，读完整 references，回看最近2–3期实际产物与反馈；只做本地规则/工具修复与离线验证，不启动当日选题、生成或旧片重制。
+6. **文案专项审查**：按用户范围回看近期实际口播、事实底稿和反馈，举证根因，按任务做局改或完整对照与复核，再合并必要规则。材料身份、独立价值与编辑顺序见 `editorial_platforms.md`；缺文件或未完成的检查如实记录。此模式不启动选题扫描、不生成素材、不覆盖原成品，交付审查、对照稿和下一期检验记录。
 
 选择或深研时读 [references/selection_and_research.md](references/selection_and_research.md)。写口播和平台版本时读 [references/editorial_platforms.md](references/editorial_platforms.md)。进入素材、生图、语音或渲染时读 [references/production_workflow.md](references/production_workflow.md)。交付前必须读 [references/quality_and_compliance.md](references/quality_and_compliance.md)。
 
@@ -29,10 +30,10 @@ Skill 固定的是编辑流程、明确长期偏好和可验证底线，不固�
 
 ## 必要能力与边界
 
-- 当前选题以本次实时 Radar 扫描为基线，同时执行站外主动发现与原文核查；Radar 不是候选白名单。站外题材注明来源，不伪造 Radar ID 或分数，不能用模型记忆或昨日缓存冒充今天。工具不可用时如实披露覆盖限制。
+- 当前选题比较实时 Radar、站外热榜和官方/权威网站，执行原文核查；Radar 不是候选白名单。站外题材注明来源，不伪造 Radar ID 或分数，不能用模型记忆或昨日缓存冒充今天。工具不可用时如实披露覆盖限制。
 - Radar 只提供发现线索和趋势观测，事实必须回到新闻原文、官方公告、监管记录、论文、赛事或产品官方材料核实。
 - 选题阶段优先使用 `topic-intelligence` 的实时证据合同；本系列已由用户明确要求“大样本扫描”，因此不要套用普通任务的前12或24条限制。
-- 生图阶段必须使用 Codex 内置 `imagegen` / Imagen；不得调用 AI 工作站的生图功能。
+- 生图按 `production_workflow.md` 的当前工具顺序与节省预算规则执行；审查阶段不调用生图。
 - 音画阶段使用 `short-video-sync` 的逐段实测时长和同步原则；本系列最终片尾规则固定为0.8秒。
 - 不使用收费生成视频功能。真实新闻视频、官方实机、现场片段和普通剪辑允许使用，但必须核对来源、权利状态和引用必要性。
 - 创作产物只写入 `/mnt/d/AIWorkstationData/creative_work/videos/` 下的独立日期项目；默认不修改业务仓库、数据库或生产服务。
@@ -59,11 +60,11 @@ Skill 固定的是编辑流程、明确长期偏好和可验证底线，不固�
 - 音画同步和技术验证报告；
 - 完整内容审核记录 `final/content_audit.json`；
 - 渲染性能与缓存报告；需要比较编码路径时附 `final/encoder_benchmark.json`；
-- 使用内置 Imagen 的提示词与产物记录；
+- 实际生图工具、提示词与产物记录；
 - 发布工作台识别结果。
 - `final/visual_risk_report.json`（只预警，不拦截）。
 - 使用 `scene_v2` 时的 `final/motion_quality_report.json`。
 
-新制作在 TTS/生图前，按 `selection_and_research.md` 运行 [scripts/check_selection_research.py](scripts/check_selection_research.py) 的 `--require` 研究记录检查。它不联网、不核实事实、不评价创意，也不改变旧 manifest 或发布状态。
+新制作在 TTS/生图前，按 `selection_and_research.md` 运行 [scripts/check_selection_research.py](scripts/check_selection_research.py) 的 `--require` 研究记录检查。它不联网、不核实事实、不评价创意，也不改变旧 manifest 或发布状态。新制作同时启用 `production_contract_version: 1`，具体字段、12秒实测门禁与兼容边界见 `automation_contracts.md`。
 
 先运行 [scripts/build_topic_history.py](scripts/build_topic_history.py) 支持选题查重；制作时用 [scripts/render_episode.py](scripts/render_episode.py) 的预览、候选、发布三档和内容寻址缓存；需要测本机编码器时用 [scripts/benchmark_render_path.py](scripts/benchmark_render_path.py)；最后运行 [scripts/validate_episode.py](scripts/validate_episode.py) 做确定性终检，后者会调用 [scripts/scan_visual_risks.py](scripts/scan_visual_risks.py) 生成只读预警。终检通过不代表事实与审美自动合格，仍需完整阅读口播、抽查画面并听原声窗口。
